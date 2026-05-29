@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>TrackerBud</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.arushsharma.trackerbud</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>TrackerBud</string>
+    <key>CFBundleDisplayName</key>
+    <string>TrackerBud</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Personal use</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>TrackerBud uses Apple Events to read active URLs from your browsers so it can track which sites you spend time on. URLs are stored locally in an encrypted database and never leave your Mac.</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>TrackerBud monitors keyboard shortcuts (modifier+key combos) to surface frequently used commands as automation candidates. It never records the content you type.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>TrackerBud watches files you open and edit so it can show which documents you spend time on. File contents are never read or stored.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>TrackerBud watches files you open and edit so it can show which documents you spend time on. File contents are never read or stored.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>TrackerBud watches files you open and edit so it can show which documents you spend time on. File contents are never read or stored.</string>
+</dict>
+</plist>
