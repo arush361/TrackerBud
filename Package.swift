@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "InputTracker", targets: ["InputTracker"]),
         .library(name: "ClipboardTracker", targets: ["ClipboardTracker"]),
         .library(name: "ScreenTracker", targets: ["ScreenTracker"]),
+        .library(name: "ScreenTimeReader", targets: ["ScreenTimeReader"]),
         .library(name: "Analysis", targets: ["Analysis"]),
     ],
     dependencies: [
@@ -29,6 +30,7 @@ let package = Package(
                 "InputTracker",
                 "ClipboardTracker",
                 "ScreenTracker",
+                "ScreenTimeReader",
                 "Analysis",
             ],
             path: "Sources/TrackerBud",
@@ -54,6 +56,10 @@ let package = Package(
         .target(name: "InputTracker", dependencies: ["TrackerBudCore"], path: "Sources/InputTracker"),
         .target(name: "ClipboardTracker", dependencies: ["TrackerBudCore"], path: "Sources/ClipboardTracker"),
         .target(name: "ScreenTracker", dependencies: ["TrackerBudCore"], path: "Sources/ScreenTracker"),
+        .target(name: "ScreenTimeReader", dependencies: [
+            "TrackerBudCore",
+            .product(name: "GRDB", package: "GRDB.swift"),
+        ], path: "Sources/ScreenTimeReader"),
         .target(name: "Analysis", dependencies: ["TrackerBudCore"], path: "Sources/Analysis"),
         .testTarget(
             name: "TrackerBudCoreTests",

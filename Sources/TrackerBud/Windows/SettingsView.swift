@@ -1,11 +1,16 @@
 import SwiftUI
 import TrackerBudCore
+import Analysis
 
 struct SettingsView: View {
     @EnvironmentObject var coordinator: TrackingCoordinator
     @State private var rules: [EventStore.PrivacyRule] = []
     @State private var newBundleID: String = ""
     @State private var newAction: String = "skip-screenshot"
+    @State private var digestSettings = DigestScheduler.loadSettings()
+    @State private var apiKeyInput: String = ""
+    @State private var apiKeyPresent: Bool = false
+    @State private var todaySpend: (input: Int, output: Int, cost: Double) = (0, 0, 0)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -83,6 +88,85 @@ struct SettingsView: View {
                     }
 
                     Section {
+                        Toggle("Enable daily digest", isOn: Binding(
+                            get: { digestSettings.dailyEnabled },
+                            set: { digestSettings.dailyEnabled = $0; persistDigestSettings() }
+                        ))
+                        HStack {
+                            Text("Daily digest hour:")
+                            Picker("", selection: Binding(
+                                get: { digestSettings.dailyHour },
+                                set: { digestSettings.dailyHour = $0; persistDigestSettings() }
+                            )) {
+                                ForEach(0..<24, id: \.self) { h in
+                                    Text(String(format: "%02d:00", h)).tag(h)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 100)
+                        }
+                        Toggle("Enable weekly digest (every Sunday)", isOn: Binding(
+                            get: { digestSettings.weeklyEnabled },
+                            set: { digestSettings.weeklyEnabled = $0; persistDigestSettings() }
+                        ))
+                        Toggle("Send macOS notifications", isOn: Binding(
+                            get: { digestSettings.notificationsEnabled },
+                            set: { digestSettings.notificationsEnabled = $0; persistDigestSettings() }
+                        ))
+                        Toggle("Write markdown to ~/Documents/TrackerBud-Digests", isOn: Binding(
+                            get: { digestSettings.markdownExportEnabled },
+                            set: { digestSettings.markdownExportEnabled = $0; persistDigestSettings() }
+                        ))
+                        HStack {
+                            Button("Generate today's digest now") {
+                                Task { await DigestScheduler.shared.runNow(kind: .daily) }
+                            }
+                            Button("Generate weekly digest now") {
+                                Task { await DigestScheduler.shared.runNow(kind: .weekly) }
+                            }
+                        }
+                    } header: {
+                        Text("Insights delivery")
+                            .font(.headline)
+                    }
+
+                    Section {
+                        if apiKeyPresent {
+                            HStack {
+                                Text("Claude API key set")
+                                    .foregroundColor(.green)
+                                Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                                Spacer()
+                                Button("Clear") { clearAPIKey() }
+                            }
+                        } else {
+                            HStack {
+                                SecureField("Paste your Claude API key (sk-ant-...)", text: $apiKeyInput)
+                                    .textFieldStyle(.roundedBorder)
+                                Button("Save") { saveAPIKey() }
+                                    .disabled(apiKeyInput.isEmpty)
+                            }
+                            Text("Stored in Keychain. Used only when you trigger an LLM-powered summary or query.")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Today's API spend")
+                                .font(.caption).foregroundColor(.secondary)
+                            HStack {
+                                Text("\(todaySpend.input) in / \(todaySpend.output) out tokens")
+                                    .font(.caption.monospacedDigit())
+                                Spacer()
+                                Text(String(format: "$%.4f", todaySpend.cost))
+                                    .font(.caption.monospacedDigit())
+                            }
+                        }
+                    } header: {
+                        Text("Claude API")
+                            .font(.headline)
+                    }
+
+                    Section {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Database: ~/Library/Application Support/TrackerBud/trackerbud.db")
                                 .font(.caption.monospaced())
@@ -98,7 +182,27 @@ struct SettingsView: View {
                 .padding()
             }
         }
-        .onAppear(perform: loadRules)
+        .onAppear { loadRules(); refreshAPIState() }
+    }
+
+    private func persistDigestSettings() {
+        DigestScheduler.saveSettings(digestSettings)
+    }
+
+    private func refreshAPIState() {
+        apiKeyPresent = APIKeyVault.shared.hasKey()
+        todaySpend = (try? EventStore.shared.todayAPISpend()).map { ($0.inputTokens, $0.outputTokens, $0.costUSD) } ?? (0, 0, 0)
+    }
+
+    private func saveAPIKey() {
+        try? APIKeyVault.shared.set(key: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines))
+        apiKeyInput = ""
+        refreshAPIState()
+    }
+
+    private func clearAPIKey() {
+        try? APIKeyVault.shared.clear()
+        refreshAPIState()
     }
 
     private func loadRules() {

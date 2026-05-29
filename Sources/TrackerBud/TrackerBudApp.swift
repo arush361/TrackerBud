@@ -35,6 +35,7 @@ struct TrackerBudApp: App {
                         try coordinator.startAll()
                         try EventStore.shared.seedDefaultPrivacyRules()
                         PatternMiner.shared.startBackgroundRefresh()
+                        DigestScheduler.shared.startBackgroundLoop()
                     } catch {
                         Logger(subsystem: "com.arushsharma.trackerbud", category: "App")
                             .error("startAll failed: \(error.localizedDescription, privacy: .public)")

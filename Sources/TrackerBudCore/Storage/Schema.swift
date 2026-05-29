@@ -135,6 +135,74 @@ public enum Schema {
             }
         }
 
+        migrator.registerMigration("v2.insights") { db in
+            // events.is_private — manual override for "exclude from API requests"
+            try db.alter(table: "events") { t in
+                t.add(column: "is_private", .boolean).notNull().defaults(to: false)
+            }
+
+            // Cached Apple Screen Time data, refreshed periodically.
+            try db.create(table: "screen_time_cache") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("bundle_id", .text).notNull()
+                t.column("date_iso", .text).notNull()        // YYYY-MM-DD local
+                t.column("total_seconds", .integer).notNull()
+                t.column("fetched_at", .double).notNull()
+            }
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_screen_time_cache_unique
+                ON screen_time_cache(bundle_id, date_iso)
+            """)
+
+            // Computed digests, persisted so we don't re-compute
+            try db.create(table: "digests") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("kind", .text).notNull()             // "daily" | "weekly"
+                t.column("range_start", .double).notNull()
+                t.column("range_end", .double).notNull()
+                t.column("created_at", .double).notNull()
+                t.column("payload_json", .text).notNull()
+            }
+            try db.execute(sql: "CREATE INDEX idx_digests_kind_range ON digests(kind, range_start)")
+
+            // Track scheduler runs so we don't double-fire digests
+            try db.create(table: "digest_runs") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("kind", .text).notNull()
+                t.column("run_at", .double).notNull()
+                t.column("status", .text).notNull()           // "ok" | "skipped" | "error"
+                t.column("message", .text)
+            }
+            try db.execute(sql: "CREATE INDEX idx_digest_runs_kind ON digest_runs(kind, run_at)")
+
+            // Claude API call log for cost tracking
+            try db.create(table: "api_calls") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("ts", .double).notNull()
+                t.column("model", .text).notNull()
+                t.column("input_tokens", .integer).notNull()
+                t.column("output_tokens", .integer).notNull()
+                t.column("cache_read_tokens", .integer).notNull().defaults(to: 0)
+                t.column("cache_creation_tokens", .integer).notNull().defaults(to: 0)
+                t.column("cost_usd", .double).notNull()
+                t.column("purpose", .text).notNull()         // "summary" | "query" | "test"
+            }
+            try db.execute(sql: "CREATE INDEX idx_api_calls_ts ON api_calls(ts)")
+
+            // Persisted session summaries from Claude
+            try db.create(table: "session_summaries") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("range_start", .double).notNull()
+                t.column("range_end", .double).notNull()
+                t.column("privacy_mode", .text).notNull()    // "tokensOnly" | "withContent"
+                t.column("model", .text).notNull()
+                t.column("prose", .text).notNull()
+                t.column("token_count", .integer).notNull()
+                t.column("created_at", .double).notNull()
+            }
+            try db.execute(sql: "CREATE INDEX idx_session_summaries_range ON session_summaries(range_start)")
+        }
+
         return migrator
     }
 }

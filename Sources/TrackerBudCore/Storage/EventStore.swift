@@ -127,6 +127,34 @@ public final class EventStore: @unchecked Sendable {
         let encryptedTitle = CryptoVault.shared.encrypt(windowTitle)
         let encryptedPayload = CryptoVault.shared.encrypt(payloadJSON) ?? payloadJSON
         let inserted: Int64 = try queue.write { db in
+            // Before inserting the new event, back-fill duration_ms on the
+            // previous foreground row of THIS session for the prior bundle.
+            // Only on type "app.activated" — window-title-change events are
+            // intra-app and shouldn't close a duration window.
+            if type == "app.activated" {
+                if let prior = try Row.fetchOne(db, sql: """
+                    SELECT e.id, e.ts, a.bundle_id
+                    FROM events e
+                    JOIN app_events a ON a.event_id = e.id
+                    WHERE e.session_id = ? AND e.source = 'app' AND e.type = 'app.activated'
+                    ORDER BY e.id DESC
+                    LIMIT 1
+                """, arguments: [sessionID]) {
+                    let priorID: Int64 = prior["id"]
+                    let priorTS: Double = prior["ts"]
+                    let priorBundle: String = prior["bundle_id"] ?? ""
+                    if priorBundle != bundleID {
+                        let durationMs = Int64((ts.timeIntervalSince1970 - priorTS) * 1000)
+                        if durationMs >= 0 && durationMs < 6 * 3600 * 1000 {  // sanity cap: 6h
+                            try db.execute(
+                                sql: "UPDATE events SET duration_ms = ? WHERE id = ?",
+                                arguments: [durationMs, priorID]
+                            )
+                        }
+                    }
+                }
+            }
+
             let ev = Event(
                 ts: ts.timeIntervalSince1970,
                 sessionId: sessionID,
@@ -148,6 +176,108 @@ public final class EventStore: @unchecked Sendable {
             return eventID
         }
         return inserted
+    }
+
+    // MARK: - Time analytics queries
+
+    public struct DayBoundary {
+        public let start: Date
+        public let end: Date
+        public init(date: Date, calendar: Calendar = .current) {
+            let startOfDay = calendar.startOfDay(for: date)
+            self.start = startOfDay
+            self.end = calendar.date(byAdding: .day, value: 1, to: startOfDay) ?? startOfDay
+        }
+    }
+
+    public func appTimeSpent(date: Date) throws -> [(bundleID: String, appName: String?, seconds: Int)] {
+        let boundary = DayBoundary(date: date)
+        let queue = try requireQueue()
+        return try queue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT a.bundle_id, a.app_name,
+                       CAST(SUM(COALESCE(e.duration_ms, 0)) / 1000 AS INTEGER) AS secs
+                FROM events e
+                JOIN app_events a ON a.event_id = e.id
+                WHERE e.source = 'app' AND e.type = 'app.activated'
+                  AND e.ts >= ? AND e.ts < ?
+                  AND e.duration_ms IS NOT NULL
+                GROUP BY a.bundle_id
+                HAVING secs > 0
+                ORDER BY secs DESC
+            """, arguments: [
+                boundary.start.timeIntervalSince1970,
+                boundary.end.timeIntervalSince1970
+            ]).map { row in
+                (bundleID: row["bundle_id"] ?? "", appName: row["app_name"], seconds: row["secs"] ?? 0)
+            }
+        }
+    }
+
+    public func siteTimeSpent(date: Date) throws -> [(host: String, seconds: Int)] {
+        // Browser tracker writes one event per URL change. We use the time
+        // between consecutive browser events of the same host as a proxy.
+        // Less accurate than apps (background tabs not counted) but useful.
+        let boundary = DayBoundary(date: date)
+        let queue = try requireQueue()
+        return try queue.read { db in
+            // Compute durations by row_number window
+            let rows = try Row.fetchAll(db, sql: """
+                WITH ordered AS (
+                    SELECT b.url_host AS host, e.ts AS ts,
+                           LEAD(e.ts) OVER (PARTITION BY e.session_id ORDER BY e.ts) AS next_ts,
+                           e.session_id
+                    FROM events e
+                    JOIN browser_events b ON b.event_id = e.id
+                    WHERE e.source = 'browser' AND e.ts >= ? AND e.ts < ?
+                )
+                SELECT host, CAST(SUM(MIN(COALESCE(next_ts - ts, 0), 1800)) AS INTEGER) AS secs
+                FROM ordered
+                WHERE next_ts IS NOT NULL
+                GROUP BY host
+                HAVING secs > 0
+                ORDER BY secs DESC
+                LIMIT 50
+            """, arguments: [
+                boundary.start.timeIntervalSince1970,
+                boundary.end.timeIntervalSince1970
+            ])
+            return rows.map { row in
+                (host: row["host"] ?? "", seconds: row["secs"] ?? 0)
+            }
+        }
+    }
+
+    public func totalActiveSeconds(date: Date) throws -> Int {
+        let rows = try appTimeSpent(date: date)
+        return rows.reduce(0) { $0 + $1.seconds }
+    }
+
+    // MARK: - Screen Time cache
+
+    public func upsertScreenTimeCache(bundleID: String, dateISO: String, totalSeconds: Int) throws {
+        let queue = try requireQueue()
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO screen_time_cache (bundle_id, date_iso, total_seconds, fetched_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(bundle_id, date_iso) DO UPDATE SET
+                    total_seconds = excluded.total_seconds,
+                    fetched_at = excluded.fetched_at
+            """, arguments: [bundleID, dateISO, totalSeconds, Date().timeIntervalSince1970])
+        }
+    }
+
+    public func screenTimeForDate(_ dateISO: String) throws -> [(bundleID: String, seconds: Int)] {
+        let queue = try requireQueue()
+        return try queue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT bundle_id, total_seconds FROM screen_time_cache
+                WHERE date_iso = ? ORDER BY total_seconds DESC
+            """, arguments: [dateISO]).map { row in
+                (bundleID: row["bundle_id"] ?? "", seconds: row["total_seconds"] ?? 0)
+            }
+        }
     }
 
     public func recentEventRows(limit: Int = 200) throws -> [EventRow] {
@@ -665,6 +795,218 @@ public final class EventStore: @unchecked Sendable {
         let queue = try requireQueue()
         try queue.write { db in
             try db.execute(sql: "DELETE FROM screenshots WHERE id = ?", arguments: [id])
+        }
+    }
+
+    // MARK: - Digests
+
+    public struct DigestRecord: Sendable, Hashable, Identifiable {
+        public let id: Int64
+        public let kind: String
+        public let rangeStart: Date
+        public let rangeEnd: Date
+        public let createdAt: Date
+        public let payloadJSON: String
+    }
+
+    public func recordDigest(kind: String, rangeStart: Date, rangeEnd: Date, payloadJSON: String) throws {
+        let queue = try requireQueue()
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO digests (kind, range_start, range_end, created_at, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+            """, arguments: [
+                kind,
+                rangeStart.timeIntervalSince1970,
+                rangeEnd.timeIntervalSince1970,
+                Date().timeIntervalSince1970,
+                payloadJSON
+            ])
+        }
+    }
+
+    public func latestDigest(kind: String) throws -> DigestRecord? {
+        let queue = try requireQueue()
+        return try queue.read { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT id, kind, range_start, range_end, created_at, payload_json
+                FROM digests WHERE kind = ?
+                ORDER BY range_start DESC, created_at DESC
+                LIMIT 1
+            """, arguments: [kind]) else { return nil }
+            return DigestRecord(
+                id: row["id"],
+                kind: row["kind"] ?? "",
+                rangeStart: Date(timeIntervalSince1970: row["range_start"]),
+                rangeEnd: Date(timeIntervalSince1970: row["range_end"]),
+                createdAt: Date(timeIntervalSince1970: row["created_at"]),
+                payloadJSON: row["payload_json"] ?? "{}"
+            )
+        }
+    }
+
+    public func recentDigests(kind: String, limit: Int = 7) throws -> [DigestRecord] {
+        let queue = try requireQueue()
+        return try queue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT id, kind, range_start, range_end, created_at, payload_json
+                FROM digests WHERE kind = ?
+                ORDER BY range_start DESC
+                LIMIT ?
+            """, arguments: [kind, limit]).map { row in
+                DigestRecord(
+                    id: row["id"],
+                    kind: row["kind"] ?? "",
+                    rangeStart: Date(timeIntervalSince1970: row["range_start"]),
+                    rangeEnd: Date(timeIntervalSince1970: row["range_end"]),
+                    createdAt: Date(timeIntervalSince1970: row["created_at"]),
+                    payloadJSON: row["payload_json"] ?? "{}"
+                )
+            }
+        }
+    }
+
+    // MARK: - Digest runs (scheduler bookkeeping)
+
+    public func recordDigestRun(kind: String, status: String, message: String?) throws {
+        let queue = try requireQueue()
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO digest_runs (kind, run_at, status, message)
+                VALUES (?, ?, ?, ?)
+            """, arguments: [kind, Date().timeIntervalSince1970, status, message])
+        }
+    }
+
+    public func lastSuccessfulDigestRun(kind: String) throws -> Date? {
+        let queue = try requireQueue()
+        return try queue.read { db in
+            let ts = try Double.fetchOne(db, sql: """
+                SELECT MAX(run_at) FROM digest_runs
+                WHERE kind = ? AND status = 'ok'
+            """, arguments: [kind])
+            return ts.map { Date(timeIntervalSince1970: $0) }
+        }
+    }
+
+    // MARK: - API calls (cost tracking)
+
+    public struct APICall: Sendable, Hashable, Identifiable {
+        public let id: Int64
+        public let ts: Date
+        public let model: String
+        public let inputTokens: Int
+        public let outputTokens: Int
+        public let cacheReadTokens: Int
+        public let cacheCreationTokens: Int
+        public let costUSD: Double
+        public let purpose: String
+    }
+
+    public func recordAPICall(
+        model: String,
+        inputTokens: Int,
+        outputTokens: Int,
+        cacheReadTokens: Int,
+        cacheCreationTokens: Int,
+        costUSD: Double,
+        purpose: String
+    ) throws {
+        let queue = try requireQueue()
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO api_calls (ts, model, input_tokens, output_tokens,
+                                       cache_read_tokens, cache_creation_tokens,
+                                       cost_usd, purpose)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [
+                Date().timeIntervalSince1970,
+                model, inputTokens, outputTokens,
+                cacheReadTokens, cacheCreationTokens,
+                costUSD, purpose
+            ])
+        }
+    }
+
+    public func todayAPISpend() throws -> (inputTokens: Int, outputTokens: Int, costUSD: Double) {
+        let queue = try requireQueue()
+        let boundary = DayBoundary(date: Date())
+        return try queue.read { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT COALESCE(SUM(input_tokens), 0) AS i,
+                       COALESCE(SUM(output_tokens), 0) AS o,
+                       COALESCE(SUM(cost_usd), 0) AS c
+                FROM api_calls
+                WHERE ts >= ? AND ts < ?
+            """, arguments: [
+                boundary.start.timeIntervalSince1970,
+                boundary.end.timeIntervalSince1970
+            ]) else {
+                return (0, 0, 0.0)
+            }
+            return (row["i"] ?? 0, row["o"] ?? 0, row["c"] ?? 0.0)
+        }
+    }
+
+    public func recentAPICalls(limit: Int = 30) throws -> [APICall] {
+        let queue = try requireQueue()
+        return try queue.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT id, ts, model, input_tokens, output_tokens,
+                       cache_read_tokens, cache_creation_tokens, cost_usd, purpose
+                FROM api_calls
+                ORDER BY ts DESC
+                LIMIT ?
+            """, arguments: [limit]).map { row in
+                APICall(
+                    id: row["id"],
+                    ts: Date(timeIntervalSince1970: row["ts"]),
+                    model: row["model"] ?? "",
+                    inputTokens: row["input_tokens"] ?? 0,
+                    outputTokens: row["output_tokens"] ?? 0,
+                    cacheReadTokens: row["cache_read_tokens"] ?? 0,
+                    cacheCreationTokens: row["cache_creation_tokens"] ?? 0,
+                    costUSD: row["cost_usd"] ?? 0,
+                    purpose: row["purpose"] ?? ""
+                )
+            }
+        }
+    }
+
+    // MARK: - Session summaries
+
+    public func recordSessionSummary(
+        rangeStart: Date,
+        rangeEnd: Date,
+        privacyMode: String,
+        model: String,
+        prose: String,
+        tokenCount: Int
+    ) throws -> Int64 {
+        let queue = try requireQueue()
+        return try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO session_summaries (range_start, range_end, privacy_mode, model, prose, token_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [
+                rangeStart.timeIntervalSince1970,
+                rangeEnd.timeIntervalSince1970,
+                privacyMode, model, prose, tokenCount,
+                Date().timeIntervalSince1970
+            ])
+            return db.lastInsertedRowID
+        }
+    }
+
+    // MARK: - Privacy event flag
+
+    public func markEventPrivate(_ eventID: Int64, isPrivate: Bool) throws {
+        let queue = try requireQueue()
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE events SET is_private = ? WHERE id = ?",
+                arguments: [isPrivate ? 1 : 0, eventID]
+            )
         }
     }
 

@@ -2,11 +2,12 @@ import SwiftUI
 import TrackerBudCore
 
 enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
-    case events, screenshots, patterns, settings
+    case insights, events, screenshots, patterns, settings
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .insights: return "Insights"
         case .events: return "Events"
         case .screenshots: return "Screenshots"
         case .patterns: return "Patterns"
@@ -16,6 +17,7 @@ enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
 
     var systemImage: String {
         switch self {
+        case .insights: return "chart.bar.xaxis"
         case .events: return "list.bullet.rectangle"
         case .screenshots: return "photo.on.rectangle"
         case .patterns: return "sparkles"
@@ -26,7 +28,7 @@ enum DashboardSection: String, CaseIterable, Identifiable, Hashable {
 
 struct DashboardWindow: View {
     @EnvironmentObject var coordinator: TrackingCoordinator
-    @State private var selection: DashboardSection? = .events
+    @State private var selection: DashboardSection? = .insights
     @State private var showOnboarding: Bool = !UserDefaults.standard.bool(forKey: "TrackerBud.onboardingComplete")
 
     var body: some View {
@@ -40,11 +42,12 @@ struct DashboardWindow: View {
             .listStyle(.sidebar)
         } detail: {
             switch selection {
+            case .insights:    InsightsView()
             case .events:      EventsListView()
             case .screenshots: ScreenshotSearchView()
             case .patterns:    PatternsView()
             case .settings:    SettingsView()
-            case .none:        EventsListView()
+            case .none:        InsightsView()
             }
         }
         .toolbar {
