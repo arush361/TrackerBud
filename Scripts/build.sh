@@ -7,7 +7,6 @@ set -euo pipefail
 CONFIG="${1:-debug}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="TrackerBud"
-BUNDLE_ID="com.arushsharma.trackerbud"
 BUILD_DIR="$ROOT_DIR/.build"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 
@@ -29,16 +28,53 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp "$ROOT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
-
-# PkgInfo
 printf "APPL????" > "$APP_DIR/Contents/PkgInfo"
 
-echo "==> Ad-hoc signing with stable identity (preserves TCC grants across rebuilds)"
-codesign --force --deep --sign - \
+# Pick the most stable signing identity available. TCC associates Screen
+# Recording / Accessibility / Input Monitoring / etc. grants with the
+# signing identity (Team ID + bundle ID for properly signed apps). If the
+# identity changes between rebuilds, all grants are invalidated and the OS
+# re-prompts. Order of preference:
+#   1. A persistent self-signed cert called "TrackerBud Self-Signed" if the
+#      user has trusted it for Code Signing (see Scripts/create-signing-cert.sh).
+#   2. The user's Apple Development cert if one exists (stable Team ID).
+#   3. Ad-hoc — only stable if zero source changes, which is rarely the case.
+SIGNING_IDENTITY="-"
+SIGN_LABEL="ad-hoc (TCC grants will reset on every source change)"
+
+# 1) Self-signed if trusted (find-identity -p codesigning -v only lists trusted)
+TS_HASH="$(security find-identity -p codesigning -v 2>/dev/null \
+    | grep '"TrackerBud Self-Signed"' \
+    | awk '{print $2}' \
+    | head -1 || true)"
+if [ -n "$TS_HASH" ]; then
+    SIGNING_IDENTITY="$TS_HASH"
+    SIGN_LABEL="TrackerBud Self-Signed ($TS_HASH)"
+fi
+
+# 2) Fall back to Apple Development cert
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    APPLE_DEV_HASH="$(security find-identity -p codesigning -v 2>/dev/null \
+        | grep '"Apple Development:' \
+        | awk '{print $2}' \
+        | head -1 || true)"
+    if [ -n "$APPLE_DEV_HASH" ]; then
+        SIGNING_IDENTITY="$APPLE_DEV_HASH"
+        SIGN_LABEL="Apple Development cert ($APPLE_DEV_HASH)"
+    fi
+fi
+
+echo "==> Signing with: $SIGN_LABEL"
+codesign --force --deep --sign "$SIGNING_IDENTITY" \
     --entitlements "$ROOT_DIR/Resources/TrackerBud.entitlements" \
+    --options runtime \
     "$APP_DIR"
 
+echo "==> Verifying signature"
+codesign -dvvv "$APP_DIR" 2>&1 | grep -E "Identifier|Signature|Authority|TeamIdentifier|CDHash" | head
+
+echo
 echo "==> Done."
 echo "App bundle: $APP_DIR"
-echo ""
+echo
 echo "Launch with:  open '$APP_DIR'"
